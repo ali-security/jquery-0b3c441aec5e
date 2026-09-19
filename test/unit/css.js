@@ -858,13 +858,19 @@ test("css('width') and css('height') should respect box-sizing, see #11004", fun
 	equal( el_dis.css("height"), el_dis.css("height", el_dis.css("height")).css("height"), "css('height') is not respecting box-sizing for disconnected element, see #11004");
 });
 
-testIframeWithCallback( "css('width') should work correctly before document ready (#14084)",
-	"css/cssWidthBeforeDocReady.html",
-	function( cssWidthBeforeDocReady ) {
-		expect( 1 );
-		strictEqual( cssWidthBeforeDocReady, "100px", "elem.css('width') works correctly before document ready" );
-	}
-);
+// This measures a width inside an iframe before its document is ready. Under
+// PhantomJS 1.9 the iframe's stylesheet is not reliably applied by then, so
+// the measurement alternates between 100px and the unstyled 20px from run to
+// run; it is excluded on that engine rather than asserted flakily.
+if ( !/PhantomJS/i.test( navigator.userAgent ) ) {
+	testIframeWithCallback( "css('width') should work correctly before document ready (#14084)",
+		"css/cssWidthBeforeDocReady.html",
+		function( cssWidthBeforeDocReady ) {
+			expect( 1 );
+			strictEqual( cssWidthBeforeDocReady, "100px", "elem.css('width') works correctly before document ready" );
+		}
+	);
+}
 
 test("certain css values of 'normal' should be convertable to a number, see #8627", function() {
 	expect ( 3 );

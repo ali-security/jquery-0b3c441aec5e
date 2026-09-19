@@ -1,0 +1,70 @@
+name: build-pack
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pack:
+    name: pack npm tarball
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # dist/ is gitignored upstream but committed into the release tag, so the
+      # tarball ships the exact built files from this tree. What the tag does
+      # NOT carry is dist/cdn/, which jQuery's release tooling (the external
+      # "jquery-release" module, not part of this repo) derived from dist/ at
+      # publish time. Recreate those nine files here:
+      #   <name>.js      copy of dist/jquery.js
+      #   <name>.min.js  dist/jquery.min.js minus the sourceMappingURL comment
+      #   <name>.min.map dist/jquery.min.map with file/sources renamed
+      # for name in jquery, jquery-<version>, jquery-latest.
+      - name: Recreate the dist/cdn release copies
+        run: |
+          cat > /tmp/cdn.js <<'CDNJS'
+          "use strict";
+          var fs = require( "fs" ),
+              version = require( process.cwd() + "/package.json" ).version,
+              cdn = "dist/cdn",
+              js = fs.readFileSync( "dist/jquery.js", "utf8" ),
+              min = fs.readFileSync( "dist/jquery.min.js", "utf8" )
+                  .replace( /\/\/# sourceMappingURL=\S+$/, "" ),
+              map = fs.readFileSync( "dist/jquery.min.map", "utf8" );
+          if ( !fs.existsSync( cdn ) ) {
+              fs.mkdirSync( cdn );
+          }
+          [ "jquery", "jquery-" + version, "jquery-latest" ].forEach(function( name ) {
+              fs.writeFileSync( cdn + "/" + name + ".js", js );
+              fs.writeFileSync( cdn + "/" + name + ".min.js", min );
+              fs.writeFileSync( cdn + "/" + name + ".min.map",
+                  map
+                      .replace( /"file":"[^"]+"/, "\"file\":\"" + name + ".min.js\"" )
+                      .replace( /"sources":\["[^"]+"\]/, "\"sources\":[\"" + name + ".js\"]" ) );
+              console.log( "created " + cdn + "/" + name + ".{js,min.js,min.map}" );
+          });
+          CDNJS
+          node /tmp/cdn.js
+          ls -l dist/cdn
+
+      # jquery 1.11.1 was published from node 0.10 / npm 1.x. Modern npm omits
+      # .npmignore from the tarball, which the published one carries, so pack
+      # inside the release-era image instead.
+      - name: npm pack (node 0.10)
+        run: |
+          docker run --rm -v "$PWD":/w node:0.10-wheezy sh -c '
+            mkdir -p /pack &&
+            cp -r /w/. /pack/ &&
+            rm -rf /pack/.git /pack/.github &&
+            cd /pack &&
+            node --version && npm --version &&
+            npm pack &&
+            cp jquery-*.tgz /w/'
+          ls -l jquery-1.11.1.tgz
+          tar tzf jquery-1.11.1.tgz | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jquery-npm-tarball
+          path: jquery-1.11.1.tgz
+          if-no-files-found: error

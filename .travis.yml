@@ -1,3 +1,95 @@
 language: node_js
 node_js:
 - '0.10'
+services:
+- docker
+before_script:
+# jQuery 1.11.x ran its QUnit suite on TestSwarm against real browsers, so the
+# repo carries no headless runner. Drive test/index.html with the era's own
+# engine (PhantomJS 1.9.8) instead. The official bitbucket downloads are gone;
+# the Medium/phantomjs mirror still serves the same binaries.
+- curl -sSL -o /tmp/phantomjs.tar.bz2 https://github.com/Medium/phantomjs/releases/download/v1.9.19/phantomjs-1.9.8-linux-x86_64.tar.bz2
+- tar xjf /tmp/phantomjs.tar.bz2 -C /tmp
+- export PHANTOMJS_BIN=/tmp/phantomjs-1.9.8-linux-x86_64/bin/phantomjs
+- $PHANTOMJS_BIN --version
+# test/unit/core.js asserts the suite is NOT on file:// and that PHP is
+# available (20 of test/data/*.php back the ajax tests), so the repo has to be
+# served by PHP. The image's PHP is 8.3, whose built-in server drops the
+# request Content-Type and mishandles bodyless POSTs that test/unit/ajax.js
+# depends on; Apache + mod_php 5.6, the stack these fixtures were written
+# against, serves them correctly.
+- docker run -d --name jquery-test-server -p 8000:80 -v "$PWD":/var/www/html php:5.6-apache
+- for i in $(seq 1 30); do curl -sSf -o /dev/null http://127.0.0.1:8000/test/index.html && break; sleep 2; done
+- curl -sSf -o /dev/null http://127.0.0.1:8000/test/index.html && echo "test server up"
+- |
+  cat > /tmp/run-qunit.js <<'RUNNER'
+  // Minimal QUnit driver: load the suite, stream module results so Travis
+  // always sees output, and exit non-zero on any failed assertion.
+  var page = require( "webpage" ).create(),
+      system = require( "system" ),
+      url = system.args[ 1 ];
+
+  page.onConsoleMessage = function( msg ) {
+      console.log( msg );
+  };
+  page.onError = function( msg ) {
+      console.log( "PAGE ERROR: " + msg );
+  };
+
+  page.onInitialized = function() {
+      page.evaluate( function() {
+          window.__qunitDone = null;
+          var attach = setInterval( function() {
+              if ( !window.QUnit ) {
+                  return;
+              }
+              clearInterval( attach );
+              QUnit.moduleDone( function( r ) {
+                  console.log( "module: " + r.name + " - " + r.passed + " passed, " +
+                      r.failed + " failed, " + r.total + " total" );
+              } );
+              QUnit.log( function( r ) {
+                  if ( !r.result ) {
+                      console.log( "  FAIL [" + r.module + "] " + ( r.name || "" ) +
+                          ": " + ( r.message || "" ) +
+                          " (expected: " + r.expected + ", actual: " + r.actual + ")" );
+                  }
+              } );
+              QUnit.done( function( r ) {
+                  window.__qunitDone = r;
+              } );
+          }, 50 );
+      } );
+  };
+
+  page.open( url, function( status ) {
+      if ( status !== "success" ) {
+          console.log( "FATAL: could not open " + url );
+          phantom.exit( 1 );
+      }
+      var waited = 0,
+          poll = setInterval( function() {
+              var done = page.evaluate( function() {
+                  return window.__qunitDone;
+              } );
+              waited += 500;
+              if ( done ) {
+                  clearInterval( poll );
+                  console.log( "QUnit results: " + done.passed + " assertions passed, " +
+                      done.failed + " failed, " + done.total + " total, in " +
+                      done.runtime + "ms" );
+                  phantom.exit( done.failed > 0 ? 1 : 0 );
+              } else if ( waited > 900000 ) {
+                  clearInterval( poll );
+                  console.log( "FATAL: QUnit suite did not finish within 15 minutes" );
+                  phantom.exit( 1 );
+              }
+          }, 500 );
+  } );
+  RUNNER
+# Travis' command pipeline can leave the heredoc terminator in the written
+# file, which PhantomJS then reports as "Can't find variable: RUNNER".
+- sed -i '/^RUNNER$/d' /tmp/run-qunit.js
+script:
+- npm test
+- $PHANTOMJS_BIN /tmp/run-qunit.js http://127.0.0.1:8000/test/index.html
